@@ -185,9 +185,79 @@ function renderMarkdown(raw) {
   }).join("\n");
 }
 
-// ── Correct server-tool agentic loop ─────────────────────────────────────────
-async function runAgenticLoop(address, onProgress, signal) {
-  const messages = [{
+// ── SSE stream parser: reads Anthropic SSE and reconstructs the response ─────
+async function parseSSEStream(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  onProgress: (msg: string) => void
+): Promise<{ stop_reason: string; content: any[] }> {
+  const decoder = new TextDecoder();
+  let buffer = "";
+  const contentBlocks: any[] = [];
+  let stopReason = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    // Process complete lines
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || ""; // keep incomplete last line in buffer
+
+    for (const line of lines) {
+      if (!line.startsWith("data: ")) continue;
+      const json = line.slice(6).trim();
+      if (json === "[DONE]") continue;
+
+      let evt: any;
+      try { evt = JSON.parse(json); } catch { continue; }
+
+      switch (evt.type) {
+        case "content_block_start":
+          // Initialize the content block
+          contentBlocks[evt.index] = { ...evt.content_block };
+          if (evt.content_block.type === "text") {
+            contentBlocks[evt.index].text = evt.content_block.text || "";
+          }
+          break;
+
+        case "content_block_delta":
+          if (evt.delta?.type === "text_delta" && contentBlocks[evt.index]) {
+            contentBlocks[evt.index].text =
+              (contentBlocks[evt.index].text || "") + evt.delta.text;
+          }
+          // For web search results, the delta carries encrypted_content etc.
+          if (evt.delta?.type === "web_search_tool_result_delta" && contentBlocks[evt.index]) {
+            // Merge delta into the content block
+            Object.assign(contentBlocks[evt.index], evt.delta);
+          }
+          break;
+
+        case "content_block_stop":
+          // Block complete — check for search results to report progress
+          if (contentBlocks[evt.index]?.type === "web_search_tool_result") {
+            onProgress(`  └─ web search result received`);
+          }
+          break;
+
+        case "message_delta":
+          if (evt.delta?.stop_reason) {
+            stopReason = evt.delta.stop_reason;
+          }
+          break;
+
+        case "error":
+          throw new Error(`Stream error: ${evt.error?.message || JSON.stringify(evt)}`);
+      }
+    }
+  }
+
+  return { stop_reason: stopReason, content: contentBlocks };
+}
+
+// ── Correct server-tool agentic loop (SSE streaming) ────────────────────────
+async function runAgenticLoop(address: string, onProgress: (msg: string) => void, signal: AbortSignal) {
+  const messages: any[] = [{
     role: "user",
     content: `Run a full property underwriting, CMA, and risk review for: ${address}\n\nStart your response directly with "**1) Subject Property Snapshot**" — no preamble, no intro sentence. Produce the complete 7-section report exactly as specified.`,
   }];
@@ -211,14 +281,29 @@ async function runAgenticLoop(address, onProgress, signal) {
 
     if (!res.ok) throw new Error(`API error ${res.status}: ${await res.text()}`);
 
-    const data = await res.json();
-    const { stop_reason, content } = data;
+    // Check if the response is SSE (streaming) or JSON (non-streaming fallback)
+    const contentType = res.headers.get("content-type") || "";
+    let stop_reason: string;
+    let content: any[];
 
-    const searches = content.filter(b => b.type === "web_search_tool_result").length;
-    if (searches) onProgress(`  └─ ${searches} search result(s) received`);
+    if (contentType.includes("text/event-stream")) {
+      // Parse SSE stream
+      const reader = res.body!.getReader();
+      const result = await parseSSEStream(reader, onProgress);
+      stop_reason = result.stop_reason;
+      content = result.content;
+    } else {
+      // Fallback: plain JSON response (for local dev without streaming)
+      const data = await res.json();
+      stop_reason = data.stop_reason;
+      content = data.content;
+    }
+
+    const searches = content.filter((b: any) => b.type === "web_search_tool_result").length;
+    if (searches) onProgress(`  └─ ${searches} search result(s) this round`);
 
     if (stop_reason === "end_turn") {
-      const text = content.filter(b => b.type === "text").map(b => b.text).join("\n\n");
+      const text = content.filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n\n");
       if (!text) throw new Error("No text in final response.");
       return text;
     }
@@ -227,11 +312,11 @@ async function runAgenticLoop(address, onProgress, signal) {
       continue;
     }
     if (stop_reason === "max_tokens") {
-      const text = content.filter(b => b.type === "text").map(b => b.text).join("\n\n");
+      const text = content.filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n\n");
       if (text) { onProgress("⚠ max_tokens hit — report may be truncated"); return text; }
       throw new Error("Hit max_tokens with no output.");
     }
-    const text = content.filter(b => b.type === "text").map(b => b.text).join("\n\n");
+    const text = content.filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n\n");
     if (text) return text;
     throw new Error(`Unexpected stop_reason: "${stop_reason}"`);
   }

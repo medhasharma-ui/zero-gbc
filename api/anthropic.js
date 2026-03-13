@@ -1,4 +1,4 @@
-// Use Vercel Edge Runtime — 30s timeout on free plan (vs 10s for serverless)
+// Vercel Edge Runtime + streaming — no timeout as long as data flows
 export const config = {
   runtime: 'edge',
 };
@@ -22,6 +22,9 @@ export default async function handler(req) {
   try {
     const body = await req.json();
 
+    // Force streaming — keeps the connection alive, avoids timeout
+    body.stream = true;
+
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
@@ -32,11 +35,22 @@ export default async function handler(req) {
       body: JSON.stringify(body),
     });
 
-    const data = await response.text();
+    if (!response.ok) {
+      const errorText = await response.text();
+      return new Response(errorText, {
+        status: response.status,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
 
-    return new Response(data, {
-      status: response.status,
-      headers: { "Content-Type": "application/json" },
+    // Pipe the SSE stream straight through to the client
+    return new Response(response.body, {
+      status: 200,
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+      },
     });
   } catch (error) {
     return new Response(JSON.stringify({ error: "Failed to call Anthropic API: " + error.message }), {
