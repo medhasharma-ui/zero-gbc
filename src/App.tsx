@@ -255,6 +255,7 @@ export default function App() {
   const [log,      setLog]      = useState<string[]>([]);
   const [stageIdx, setStageIdx] = useState(0);
   const [errorMsg, setErrorMsg] = useState("");
+  const [showRaw, setShowRaw]   = useState(false);
   const reportRef  = useRef<HTMLDivElement | null>(null);
   const stageTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const abortRef   = useRef<AbortController | null>(null);
@@ -289,7 +290,7 @@ export default function App() {
 
   function handleReset() {
     abortRef.current?.abort();
-    setStatus("idle"); setReport(""); setLog([]); setErrorMsg(""); setAddress("");
+    setStatus("idle"); setReport(""); setLog([]); setErrorMsg(""); setAddress(""); setShowRaw(false);
   }
 
   return (
@@ -352,10 +353,17 @@ export default function App() {
         <main style={S.mainW}>
           <div style={S.doneBar}>
             <div><span style={S.chk}>✓</span><span style={S.doneTitle}>Report Complete</span><span style={S.doneAddr}>{address}</span></div>
-            <button style={S.newBtn} onClick={handleReset}>New Address</button>
+            <div style={{display:"flex",gap:8}}>
+              <button style={{...S.cancel, fontSize:11}} onClick={() => setShowRaw(!showRaw)}>{showRaw ? "Formatted" : "Show Raw"}</button>
+              <button style={S.newBtn} onClick={handleReset}>New Address</button>
+            </div>
           </div>
-          <div style={S.report} ref={reportRef}
-            dangerouslySetInnerHTML={{ __html: renderMarkdown(report) }} />
+          {showRaw ? (
+            <pre style={{...S.report, whiteSpace:"pre-wrap" as const, fontSize:12, fontFamily:"monospace", overflow:"auto", maxHeight:800}}>{report}</pre>
+          ) : (
+            <div style={S.report} ref={reportRef}
+              dangerouslySetInnerHTML={{ __html: renderMarkdown(report) }} />
+          )}
         </main>
       )}
 
