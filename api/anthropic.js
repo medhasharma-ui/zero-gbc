@@ -1,26 +1,16 @@
-// Vercel Edge Runtime + streaming — no timeout as long as data flows
-export const config = {
-  runtime: 'edge',
-};
-
-export default async function handler(req) {
+export default async function handler(req, res) {
   if (req.method !== "POST") {
-    return new Response(JSON.stringify({ error: "Method not allowed" }), {
-      status: 405,
-      headers: { "Content-Type": "application/json" },
-    });
+    return res.status(405).json({ error: "Method not allowed" });
   }
 
   const apiKey = process.env.ANTHROPIC_API_KEY;
+  console.log("ENV KEYS:", Object.keys(process.env).filter(k => k.includes("ANTHROPIC") || k.includes("API")));
   if (!apiKey) {
-    return new Response(JSON.stringify({ error: "ANTHROPIC_API_KEY not configured" }), {
-      status: 500,
-      headers: { "Content-Type": "application/json" },
-    });
+    return res.status(500).json({ error: "ANTHROPIC_API_KEY not configured", envKeys: Object.keys(process.env).slice(0, 20) });
   }
 
   try {
-    const body = await req.json();
+    const body = req.body;
 
     // Force streaming — keeps the connection alive, avoids timeout
     body.stream = true;
@@ -37,25 +27,18 @@ export default async function handler(req) {
 
     if (!response.ok) {
       const errorText = await response.text();
-      return new Response(errorText, {
-        status: response.status,
-        headers: { "Content-Type": "application/json" },
-      });
+      return res.status(response.status).send(errorText);
     }
 
     // Pipe the SSE stream straight through to the client
-    return new Response(response.body, {
-      status: 200,
-      headers: {
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache",
-        "Connection": "keep-alive",
-      },
-    });
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    await response.body.pipeTo(new WritableStream({
+      write(chunk) { res.write(chunk); },
+      close() { res.end(); },
+    }));
   } catch (error) {
-    return new Response(JSON.stringify({ error: "Failed to call Anthropic API: " + error.message }), {
-      status: 500,
-      headers: { "Content-Type": "application/json" },
-    });
+    return res.status(500).json({ error: "Failed to call Anthropic API: " + error.message });
   }
 }
